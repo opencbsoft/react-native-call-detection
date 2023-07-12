@@ -1,12 +1,31 @@
 package com.pritesh.calldetection;
 
+
+import static android.content.Context.ROLE_SERVICE;
+import static android.provider.CallLog.Calls.LIMIT_PARAM_KEY;
+
+import android.Manifest;
 import android.app.Activity;
 import android.app.Application;
+import android.app.role.RoleManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.preference.PreferenceManager;
+import android.telecom.Call;
 import android.telephony.PhoneStateListener;
+import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyCallback;
 import android.telephony.TelephonyManager;
 import android.util.Log;
+import android.content.ContentResolver;
+import android.database.Cursor;
+import android.provider.CallLog;
+
+import androidx.annotation.RequiresApi;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -15,10 +34,12 @@ import com.facebook.react.bridge.ReactMethod;
 import java.util.HashMap;
 import java.util.Map;
 
+
 public class CallDetectionManagerModule
         extends ReactContextBaseJavaModule
         implements Application.ActivityLifecycleCallbacks,
         CallDetectionPhoneStateListener.PhoneCallStateUpdate {
+
 
     private boolean wasAppInOffHook = false;
     private boolean wasAppInRinging = false;
@@ -27,6 +48,7 @@ public class CallDetectionManagerModule
     private CallStateUpdateActionModule jsModule = null;
     private CallDetectionPhoneStateListener callDetectionPhoneStateListener;
     private Activity activity = null;
+    private Intent intent;
 
     public CallDetectionManagerModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -48,17 +70,48 @@ public class CallDetectionManagerModule
         telephonyManager = (TelephonyManager) this.reactContext.getSystemService(
                 Context.TELEPHONY_SERVICE);
         callDetectionPhoneStateListener = new CallDetectionPhoneStateListener(this);
-        telephonyManager.listen(callDetectionPhoneStateListener,
-                PhoneStateListener.LISTEN_CALL_STATE);
+
+
+        // Adapted from https://stackoverflow.com/a/71789261
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            if (reactContext.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+                telephonyManager.registerTelephonyCallback(ContextCompat.getMainExecutor(reactContext), callStateListener);
+            }
+        } else {
+            telephonyManager.listen(callDetectionPhoneStateListener, PhoneStateListener.LISTEN_CALL_STATE);
+        }
 
     }
 
+    @RequiresApi(api = android.os.Build.VERSION_CODES.S)
+    private static abstract class CallStateListener extends TelephonyCallback implements TelephonyCallback.CallStateListener {
+        @Override
+        abstract public void onCallStateChanged(int state);
+    }
+
+    private boolean callStateListenerRegistered = false;
+
+    private CallStateListener callStateListener = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) ?
+            new CallStateListener() {
+                @Override
+                public void onCallStateChanged(int state) {
+                // Handle call state change
+                String number = PreferenceManager.getDefaultSharedPreferences(reactContext).getString("INCOMING_PHONE_CALL", "");
+                phoneCallStateUpdated(state, number);
+                }
+            }
+            : null;
+
     @ReactMethod
     public void stopListener() {
-        telephonyManager.listen(callDetectionPhoneStateListener,
-                PhoneStateListener.LISTEN_NONE);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            telephonyManager.unregisterTelephonyCallback(callStateListener);
+        } else {
+            telephonyManager.listen(callDetectionPhoneStateListener,
+                    PhoneStateListener.LISTEN_NONE);
+            callDetectionPhoneStateListener = null;
+        }
         telephonyManager = null;
-        callDetectionPhoneStateListener = null;
     }
 
     /**
@@ -110,9 +163,13 @@ public class CallDetectionManagerModule
 
     }
 
+
     @Override
     public void phoneCallStateUpdated(int state, String phoneNumber) {
         jsModule = this.reactContext.getJSModule(CallStateUpdateActionModule.class);
+
+        String stateStr = String.valueOf(state);
+        Log.d("CallStateChange", "-> " + stateStr + " " + phoneNumber);
 
         switch (state) {
             //Hangup
